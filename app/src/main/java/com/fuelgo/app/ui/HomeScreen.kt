@@ -137,11 +137,18 @@ fun HomeScreen(state: AppState, vm: AppViewModel) {
 
             if (state.stations.isEmpty() && !state.loading) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "No stations cached yet.\nEnable location and check your connection.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "No stations cached yet.\n" +
+                                (state.error ?: "Enable location and check your connection."),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = { vm.refresh() }) {
+                            Text("Try again")
+                        }
+                    }
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {

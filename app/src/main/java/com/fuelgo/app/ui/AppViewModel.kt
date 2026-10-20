@@ -142,7 +142,12 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             _state.update {
                 it.copy(
                     loading = false,
-                    error = if (networkOk) null else "Offline — showing cached stations.",
+                    error = if (networkOk) {
+                        null
+                    } else {
+                        "Couldn't reach the station data service — it may be busy or " +
+                            "temporarily unavailable. Tap Try again in a moment."
+                    },
                 )
             }
         }

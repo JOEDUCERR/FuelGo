@@ -2,6 +2,7 @@ package com.fuelgo.app.data.repo
 
 import com.fuelgo.app.data.api.OverpassApi
 import com.fuelgo.app.data.api.OverpassQueries
+import com.fuelgo.app.data.api.OverpassMirrors
 import com.fuelgo.app.data.api.PlacesApi
 import com.fuelgo.app.data.api.Center
 import com.fuelgo.app.data.api.Circle
@@ -63,11 +64,16 @@ class StationRepository(
             val fromPlaces = runCatching { fetchPlaces(lat, lon) }.getOrNull()
             if (fromPlaces != null) return fromPlaces
         }
-        return runCatching { fetchOverpass(lat, lon) }.getOrNull()
+        // Try each Overpass mirror in turn; the first success wins.
+        for (url in OverpassMirrors.urls) {
+            val fromOsm = runCatching { fetchOverpass(url, lat, lon) }.getOrNull()
+            if (fromOsm != null) return fromOsm
+        }
+        return null
     }
 
-    private suspend fun fetchOverpass(lat: Double, lon: Double): List<Station> {
-        val response = overpassApi.interpret(OverpassQueries.fuelAround(lat, lon))
+    private suspend fun fetchOverpass(url: String, lat: Double, lon: Double): List<Station> {
+        val response = overpassApi.interpret(url, OverpassQueries.fuelAround(lat, lon))
         return response.elements.mapNotNull { el ->
             val (plat, plon) = when {
                 el.lat != null && el.lon != null -> el.lat to el.lon

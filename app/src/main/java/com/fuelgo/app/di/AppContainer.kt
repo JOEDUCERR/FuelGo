@@ -30,7 +30,8 @@ class AppContainer(val appContext: Context) {
 
     private val okHttp = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        // Overpass instances can be slow under load; give each mirror time.
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
     private val overpassRetrofit = Retrofit.Builder()

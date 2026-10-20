@@ -4,13 +4,14 @@ import kotlinx.serialization.Serializable
 import retrofit2.http.Field
 import retrofit2.http.FormUrlEncoded
 import retrofit2.http.POST
+import retrofit2.http.Url
 
 interface OverpassApi {
 
     /** Free, keyless OSM Overpass API — FuelGo's default station provider. */
     @FormUrlEncoded
-    @POST("api/interpreter")
-    suspend fun interpret(@Field("data") query: String): OverpassResponse
+    @POST
+    suspend fun interpret(@Url url: String, @Field("data") query: String): OverpassResponse
 }
 
 @Serializable
@@ -42,4 +43,17 @@ object OverpassQueries {
         );
         out center 80;
         """.trimIndent()
+}
+
+/**
+ * Overpass endpoints tried in order. Instances are community-run and throttle
+ * or refuse datacenter IPs, so the app falls back across mirrors.
+ */
+object OverpassMirrors {
+    val urls = listOf(
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    )
 }
