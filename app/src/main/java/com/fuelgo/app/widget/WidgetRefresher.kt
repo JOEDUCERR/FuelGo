@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.glance.appwidget.updateAll
 import com.fuelgo.app.FuelGoApp
 import com.fuelgo.app.data.prefs.WidgetState
+import com.fuelgo.app.domain.Geo
 import com.fuelgo.app.domain.StatusAggregator
 import com.fuelgo.app.domain.hoursStatus
 import java.time.ZonedDateTime
@@ -26,7 +27,7 @@ object WidgetRefresher {
             val ranked = container.stationRepository.cachedNearby(lat, lon, snap.fuelType)
             val nearest = ranked.firstOrNull()
             if (nearest != null) {
-                val (station, _) = nearest
+                val (station, distanceMeters) = nearest
                 val now = System.currentTimeMillis()
                 val reports = container.reportRepository
                     .recentReports(listOf(station.id))[station.id] ?: emptyList()
@@ -36,7 +37,15 @@ object WidgetRefresher {
                     now,
                 )
                 container.prefs.saveWidgetState(
-                    WidgetState(station.name, station.lat, station.lon, effective.status.name, now),
+                    WidgetState(
+                        name = station.name,
+                        lat = station.lat,
+                        lon = station.lon,
+                        status = effective.status.name,
+                        distanceText = Geo.formatDistance(distanceMeters),
+                        fuelType = snap.fuelType.displayName,
+                        updatedAtMs = now,
+                    ),
                 )
             }
         }

@@ -54,6 +54,16 @@ class StationOpsTest {
     }
 
     @Test
+    fun `stations with verified fuel rank above nearer unknown ones`() {
+        val stations = listOf(
+            station("unknown-nearer", lat = lat + 0.001), // 111 m away, fuel unknown
+            station("known-farther", lat = lat + 0.004, fuels = setOf(FuelType.CNG)),
+        )
+        val ranked = StationOps.rankAndFilter(stations, lat, lon, FuelType.CNG, limit = 5)
+        assertEquals(listOf("known-farther", "unknown-nearer"), ranked.map { it.first.id })
+    }
+
+    @Test
     fun `filters out stations without requested fuel when tags known`() {
         val stations = listOf(
             station("diesel-only", fuels = setOf(FuelType.DIESEL)),
@@ -96,5 +106,32 @@ class StationOpsTest {
         )
         val merged = StationOps.merge(places, osm)
         assertEquals(listOf("places-1", "osm-other"), merged.map { it.id })
+    }
+
+    @Test
+    fun `merge unions fuel tags from fallback onto primary`() {
+        val places = listOf(
+            station("places-pump", lat = 28.6, lon = 77.2, fuels = emptySet()),
+        )
+        val osm = listOf(
+            station("osm-pump", lat = 28.6, lon = 77.2, fuels = setOf(FuelType.CNG)),
+        )
+        val merged = StationOps.merge(places, osm)
+        assertEquals(1, merged.size)
+        assertEquals("places-pump", merged[0].id)
+        assertEquals(setOf(FuelType.CNG), merged[0].fuelTypes)
+    }
+
+    @Test
+    fun `merge keeps places hours when osm has some too`() {
+        val places = listOf(
+            Station("places-pump", "Indian Oil", 28.6, 77.2, "0:0800-0:2000", emptySet(), StationSource.PLACES),
+        )
+        val osm = listOf(
+            Station("osm-pump", "Indian Oil", 28.6, 77.2, "Mo-Su 08:00-20:00", emptySet(), StationSource.OSM),
+        )
+        val merged = StationOps.merge(places, osm)
+        assertEquals(1, merged.size)
+        assertEquals("0:0800-0:2000", merged[0].rawOpeningHours)
     }
 }

@@ -68,7 +68,13 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
     }
 
     fun setFuelType(fuelType: FuelType) {
-        viewModelScope.launch { container.prefs.setFuelType(fuelType) }
+        viewModelScope.launch {
+            container.prefs.setFuelType(fuelType)
+            // The prefs collector re-ranks the cache immediately; follow up
+            // with a network refresh so the new fuel type gets fresh ranking
+            // and fuel-tag blend from the providers.
+            refresh()
+        }
     }
 
     fun setWidgetRefreshMinutes(minutes: Int) {

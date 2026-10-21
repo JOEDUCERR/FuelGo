@@ -15,7 +15,7 @@ interface PlacesApi {
     suspend fun searchNearby(
         @Header("X-Goog-Api-Key") apiKey: String,
         @Header("X-Goog-FieldMask") fieldMask: String =
-            "places.id,places.displayName,places.location,places.regularOpeningHours",
+            "places.id,places.displayName,places.location,places.types,places.primaryType,places.regularOpeningHours",
         @Body body: NearbySearchRequest,
     ): PlacesResponse
 }
@@ -46,7 +46,13 @@ data class PlaceDto(
     val displayName: DisplayNameDto? = null,
     val location: LocationDto? = null,
     val regularOpeningHours: RegularOpeningHoursDto? = null,
-)
+    val types: List<String> = emptyList(),
+    val primaryType: String? = null,
+) {
+    /** True only when Google actually categorizes this POI as a fuel station. */
+    val isFuelStation: Boolean
+        get() = primaryType == "gas_station" || types.contains("gas_station")
+}
 
 @Serializable
 data class DisplayNameDto(val text: String? = null)

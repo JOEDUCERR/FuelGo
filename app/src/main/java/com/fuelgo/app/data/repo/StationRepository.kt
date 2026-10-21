@@ -3,12 +3,10 @@ package com.fuelgo.app.data.repo
 import com.fuelgo.app.data.api.OverpassApi
 import com.fuelgo.app.data.api.OverpassQueries
 import com.fuelgo.app.data.api.OverpassMirrors
-import com.fuelgo.app.data.api.PlacesApi
 import com.fuelgo.app.data.api.Center
 import com.fuelgo.app.data.api.Circle
 import com.fuelgo.app.data.api.LocationRestriction
 import com.fuelgo.app.data.api.NearbySearchRequest
-import com.fuelgo.app.data.db.ReportDao
 import com.fuelgo.app.data.db.StationDao
 import com.fuelgo.app.data.db.StationEntity
 import com.fuelgo.app.domain.StationOps
@@ -16,23 +14,31 @@ import com.fuelgo.app.domain.model.FuelType
 import com.fuelgo.app.domain.model.Station
 import com.fuelgo.app.domain.model.StationSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Station data layer. Cache-first: the UI reads [cachedNearby] instantly from
- * Room; [refresh] performs at most one network call per invocation and upserts
- * the result.
+ * Room; [refresh] performs the network fan-out and upserts the result.
  *
- * Provider selection: Google Places (new API) when an API key is configured,
- * OSM Overpass otherwise — and as automatic fallback when Places fails.
+ * Provider strategy: when a Google Places key is configured, Places and OSM
+ * are fetched in parallel and merged — Places contributes better names and
+ * quality opening hours, OSM contributes the fuel-type tags (fuel:diesel /
+ * fuel:petrol / fuel:cng) that power the fuel-type filter. Without a key, OSM
+ * alone is used. Places results are validated client-side so that POIs not
+ * categorized as gas_station are dropped.
  */
 class StationRepository(
     private val stationDao: StationDao,
     private val overpassApi: OverpassApi,
-    private val placesApi: PlacesApi?,
-    private val placesApiKey: String?,
+    private val placesApi: PlacesApiHandle?,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
+
+    /** Bundled Places client + key, or null when no key is configured. */
+    class PlacesApiHandle(val api: com.fuelgo.app.data.api.PlacesApi, val apiKey: String)
 
     /** Instant, offline-capable read: rank cached stations for display. */
     suspend fun cachedNearby(
@@ -46,28 +52,46 @@ class StationRepository(
     }
 
     /**
-     * Network refresh. Returns true when the network fetch succeeded (either
-     * provider); the cache is untouched on failure.
+     * Network refresh. Returns true when at least one provider responded
+     * successfully (even for an empty area); cache untouched on total failure.
      */
     suspend fun refresh(lat: Double, lon: Double, fuelType: FuelType): Boolean =
         withContext(Dispatchers.IO) {
             val now = clock()
-            val fetched = tryFetch(lat, lon)
-                ?: return@withContext false
-            stationDao.upsertAll(fetched.map { it.toEntity(now) })
+            val anySuccess = AtomicBoolean(false)
+            var merged: List<Station> = emptyList()
+
+            coroutineScope {
+                val osmDeferred = async {
+                    fetchOverpassFirst(lat, lon)?.also { anySuccess.set(true) }.orEmpty()
+                }
+                val placesDeferred: kotlinx.coroutines.Deferred<List<Station>>? =
+                    if (placesApi != null) {
+                        async {
+                            runCatching { fetchPlaces(lat, lon) }
+                                .onSuccess { anySuccess.set(true) }
+                                .getOrDefault(emptyList())
+                        }
+                    } else {
+                        null
+                    }
+
+                val fromOsm = osmDeferred.await()
+                val fromPlaces = placesDeferred?.await() ?: emptyList()
+                merged = StationOps.merge(fromPlaces, fromOsm)
+            }
+
+            if (merged.isEmpty()) return@withContext anySuccess.get()
+            stationDao.upsertAll(merged.map { it.toEntity(now) })
             stationDao.pruneOlderThan(now - StationOps.CACHE_TTL_MS)
-            true
+            anySuccess.get()
         }
 
-    private suspend fun tryFetch(lat: Double, lon: Double): List<Station>? {
-        if (placesApi != null && !placesApiKey.isNullOrBlank()) {
-            val fromPlaces = runCatching { fetchPlaces(lat, lon) }.getOrNull()
-            if (fromPlaces != null) return fromPlaces
-        }
-        // Try each Overpass mirror in turn; the first success wins.
+    /** Tries each Overpass mirror in turn; null only when every mirror fails. */
+    private suspend fun fetchOverpassFirst(lat: Double, lon: Double): List<Station>? {
         for (url in OverpassMirrors.urls) {
-            val fromOsm = runCatching { fetchOverpass(url, lat, lon) }.getOrNull()
-            if (fromOsm != null) return fromOsm
+            val result = runCatching { fetchOverpass(url, lat, lon) }.getOrNull()
+            if (result != null) return result
         }
         return null
     }
@@ -94,30 +118,31 @@ class StationRepository(
     }
 
     private suspend fun fetchPlaces(lat: Double, lon: Double): List<Station> {
-        val api = placesApi ?: error("Places API not configured")
-        val key = placesApiKey ?: error("Places API key missing")
-        val response = api.searchNearby(
-            apiKey = key,
+        val handle = placesApi ?: error("Places API not configured")
+        val response = handle.api.searchNearby(
+            apiKey = handle.apiKey,
             body = NearbySearchRequest(
                 locationRestriction = LocationRestriction(
                     circle = Circle(center = Center(lat, lon), radius = 5000.0),
                 ),
             ),
         )
-        return response.places.mapNotNull { place ->
-            val loc = place.location ?: return@mapNotNull null
-            Station(
-                id = "places:${place.id}",
-                name = place.displayName?.text ?: "Fuel station",
-                lat = loc.latitude,
-                lon = loc.longitude,
-                rawOpeningHours = place.regularOpeningHours?.toRawString(),
-                // Places (new API) does not expose per-fuel availability; keep
-                // empty so no station is filtered out.
-                fuelTypes = emptySet(),
-                source = StationSource.PLACES,
-            )
-        }
+        return response.places
+            .filter { it.isFuelStation } // drop POIs Google does not categorize as fuel
+            .mapNotNull { place ->
+                val loc = place.location ?: return@mapNotNull null
+                Station(
+                    id = "places:${place.id}",
+                    name = place.displayName?.text ?: "Fuel station",
+                    lat = loc.latitude,
+                    lon = loc.longitude,
+                    rawOpeningHours = place.regularOpeningHours?.toRawString(),
+                    // Places (new API) does not expose per-fuel availability;
+                    // empty set = unknown so the fuel filter keeps the station.
+                    fuelTypes = emptySet(),
+                    source = StationSource.PLACES,
+                )
+            }
     }
 
     private fun Station.toEntity(fetchedAtMs: Long) = StationEntity(

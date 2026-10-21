@@ -41,18 +41,37 @@ over-build. Every feature below is scoped to keep total effort small.
 
 ### Station data (v1)
 
-Primary: Google Places API (Nearby Search, type `gas_station`), plus Place Details
-for opening hours where needed. Requirements:
+Providers fetched in parallel and merged when a Places key is configured:
+
+- **Google Places API (New)** — Nearby Search, `includedTypes: ["gas_station"]`,
+  field mask including `places.types`/`places.primaryType`. Results are
+  validated client-side: POIs not categorized `gas_station` are dropped (guards
+  against Google data quirks returning industrial/park POIs).
+- **OpenStreetMap Overpass API** — free, keyless, default when no Places key.
+  Multiple mirrors are tried in order (`overpass-api.de` → `kumi.systems` →
+  `private.coffee` → `maps.mail.ru`) because instances throttle or refuse some
+  IPs; first success wins.
+
+Merge rules (see `StationOps.merge`): records within ~30 m of each other
+collapse into one — Places name/id/hours survive, and OSM fuel tags
+(`fuel:diesel`, `fuel:petrol`, `fuel:cng`) are unioned onto the record.
+
+Requirements:
 
 - API key read from `local.properties` as `PLACES_API_KEY` (never committed).
 - Aggressive caching: station locations rarely change. Cache station POIs in Room
   keyed by geohash/area; only the distance ranking is recomputed per fix.
-- A single app open should make at most 1–2 network calls. Widget updates must
-  work from cache with a stale-while-revalidate pattern.
+- A single app open should make: 1 Places call (if configured) + 1 Overpass
+  call + at most 1 reports query. Widget updates must work from cache with a
+  stale-while-revalidate pattern.
 
-Fallback: OpenStreetMap Overpass API (free, no key). The app MUST be runnable and
-demoable without a Places key — OSM fallback should be the default when no key is
-configured, so builds work out of the box.
+### Fuel-type ranking
+
+`StationOps.rankAndFilter` orders stations: those whose fuel tags VERIFIABLY
+include the requested fuel type first, then by distance; stations with unknown
+fuel tags always shown last. Switching fuel type re-ranks the cache instantly
+AND triggers a full network refresh (the fuel-tag blend only comes fresh from
+the providers).
 
 ### Open/closed status
 
@@ -110,13 +129,25 @@ app/
 
 ### Widget behavior
 
-- 1x1 resizable AppWidget (Glance). Shows: nearest pump name (truncated) and a
-  status dot (green open / red closed / grey unknown).
+- 1x1 resizable AppWidget (Glance) — a "mini-navigation" card, not a launcher.
+  Content, top to bottom: status dot (green open / red closed / grey unknown),
+  nearest pump name (truncated), **distance left** to that pump (pre-formatted,
+  e.g. "1.2 km"), and the **selected fuel type** label.
 - Tap widget → opens Google Maps navigation to nearest pump directly (no app
-  launch in between; if location unknown, open the app).
-- Updates: on location change (passive, coarse is fine), on app open, and at
-  most every 15 min via WorkManager. Widget must never block on network — render
-  from cache, refresh in background.
+  launch in between; if location unknown, open the app). Note the constraint
+  this design encodes: Android does not allow a widget to run turn-by-turn
+  navigation in the background — `LocationManager` updates while the user
+  drives give the widget its live-ish "distance left", and the actual route
+  rendering happens in Maps after the tap.
+- Updates:
+  - on app open (cache-only),
+  - via WorkManager at most every 15 min (configurable 15/30/60 in Settings),
+  - from a PASSIVE-provider location listener (~60 s / 25 m thresholds) so the
+    distance ticks over while driving at effectively zero battery cost —
+    passive updates only arrive while other apps use GPS.
+- Update path: `WidgetRefresher` — passive/app-open use `updateFromCache`
+  (zero network); WorkManager uses `fullRefresh` (location + best-effort
+  network, then cache render). The widget NEVER blocks on the network.
 
 ## Performance requirements (these are the product)
 

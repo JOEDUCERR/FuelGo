@@ -43,14 +43,13 @@ class AppContainer(val appContext: Context) {
     private val overpassApi = overpassRetrofit.create(OverpassApi::class.java)
 
     /** Null when no key is configured — OSM stays the default provider. */
-    private val placesApi: PlacesApi? =
+    private val placesApi: StationRepository.PlacesApiHandle? =
         if (BuildConfig.PLACES_API_KEY.isBlank()) null else placesRetrofit()
 
     val stationRepository = StationRepository(
         stationDao = database.stationDao(),
         overpassApi = overpassApi,
         placesApi = placesApi,
-        placesApiKey = BuildConfig.PLACES_API_KEY.ifBlank { null },
     )
 
     val reportRepository = ReportRepository(
@@ -59,11 +58,14 @@ class AppContainer(val appContext: Context) {
         prefs = prefs,
     )
 
-    private fun placesRetrofit(): PlacesApi =
-        Retrofit.Builder()
-            .baseUrl("https://places.googleapis.com/")
-            .client(okHttp)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(PlacesApi::class.java)
+    private fun placesRetrofit(): StationRepository.PlacesApiHandle =
+        StationRepository.PlacesApiHandle(
+            api = Retrofit.Builder()
+                .baseUrl("https://places.googleapis.com/")
+                .client(okHttp)
+                .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+                .build()
+                .create(PlacesApi::class.java),
+            apiKey = BuildConfig.PLACES_API_KEY,
+        )
 }

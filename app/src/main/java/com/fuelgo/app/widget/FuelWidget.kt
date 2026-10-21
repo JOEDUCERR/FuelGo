@@ -53,31 +53,61 @@ object FuelWidget : GlanceAppWidget() {
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "\u25CF", // filled circle glyph, colored by status
-                    style = TextStyle(
-                        color = ColorProvider(statusColor(state)),
-                        fontSize = 14.sp,
-                    ),
-                )
-                Text(
-                    text = state?.name?.take(12) ?: "FuelGo",
-                    style = TextStyle(
-                        color = ColorProvider(Color(0xFF212121)),
-                        fontSize = 9.sp,
-                    ),
-                    maxLines = 1,
-                )
+                if (state == null) {
+                    Text(
+                        text = "\u25CF",
+                        style = TextStyle(color = ColorProvider(GREY), fontSize = 13.sp),
+                    )
+                    Text(
+                        text = "FuelGo",
+                        style = TextStyle(color = ColorProvider(INK), fontSize = 8.sp),
+                        maxLines = 1,
+                    )
+                } else {
+                    // Status dot
+                    Text(
+                        text = "\u25CF",
+                        style = TextStyle(color = ColorProvider(statusColor(state)), fontSize = 12.sp),
+                    )
+                    // Nearest pump name
+                    Text(
+                        text = state.name.take(11),
+                        style = TextStyle(color = ColorProvider(INK), fontSize = 8.sp),
+                        maxLines = 1,
+                    )
+                    // Live-ish distance left to the pump
+                    if (state.distanceText.isNotBlank()) {
+                        Text(
+                            text = state.distanceText,
+                            style = TextStyle(color = ColorProvider(INK), fontSize = 11.sp),
+                            maxLines = 1,
+                        )
+                    }
+                    // Pre-configured fuel type
+                    if (state.fuelType.isNotBlank()) {
+                        Text(
+                            text = state.fuelType,
+                            style = TextStyle(color = ColorProvider(MUTED), fontSize = 7.sp),
+                            maxLines = 1,
+                        )
+                    }
+                }
             }
         }
     }
 
-    private fun statusColor(state: WidgetState?): Color =
-        when (state?.status?.let { s -> runCatching { PumpStatus.valueOf(s) }.getOrNull() }) {
-            PumpStatus.OPEN -> Color(0xFF2E7D32)
-            PumpStatus.CLOSED -> Color(0xFFC62828)
-            else -> Color(0xFF9E9E9E)
+    private fun statusColor(state: WidgetState): Color =
+        when (state.status.let { s -> runCatching { PumpStatus.valueOf(s) }.getOrNull() }) {
+            PumpStatus.OPEN -> OPEN_GREEN
+            PumpStatus.CLOSED -> CLOSED_RED
+            else -> GREY
         }
+
+    private val OPEN_GREEN = Color(0xFF2E7D32)
+    private val CLOSED_RED = Color(0xFFC62828)
+    private val GREY = Color(0xFF9E9E9E)
+    private val INK = Color(0xFF212121)
+    private val MUTED = Color(0xFF757575)
 }
 
 /** Widget tap: one intent straight into Maps navigation to the nearest pump. */

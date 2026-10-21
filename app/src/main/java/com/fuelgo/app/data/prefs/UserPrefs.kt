@@ -27,7 +27,11 @@ data class WidgetState(
     val lon: Double,
     /** PumpStatus name. */
     val status: String,
-    val updatedAtMs: Long,
+    /** Pre-formatted distance from the user's last known fix, e.g. "1.2 km". */
+    val distanceText: String = "",
+    /** Selected fuel type name, e.g. "Diesel". */
+    val fuelType: String = "",
+    val updatedAtMs: Long = 0,
 )
 
 class UserPrefs(private val context: Context) {
