@@ -21,9 +21,10 @@ import retrofit2.http.POST
  *   genuinely are petrol pumps. That is what this request uses.
  *
  * On top of the server-side primary-type filter, results pass through
- * [PlacesFuelFilter]: positive-evidence verification with a never-blank
- * fallback, so bad categorization can show junk results but NEVER an
- * empty station list.
+ * [PlacesFuelFilter]: primary-type-only verification. If verification empties
+ * the Places results, the repository relies on OSM results only — with an
+ * honest empty state when both providers have nothing. Unverified Places
+ * POIs are never shown.
  */
 interface PlacesApi {
 
@@ -72,32 +73,27 @@ data class PlaceDto(
     val primaryType: String? = null,
 ) {
     /**
-     * Positive-evidence fuel-pump check: Google tells us this business IS
-     * categorized as a petrol pump (primary or listed types). Requires
-     * affirmative gas_station categorization — absence of evidence is NOT
-     * evidence of a pump.
+     * Fuel-pump verification, PRIMARY TYPE ONLY: a place counts as a petrol
+     * pump exclusively when Google's PRIMARY category is `gas_station`. A
+     * secondary `gas_station` in `types[]` must NOT pass — Google's India
+     * data lets offices/boiler plants carry stray secondary types, which
+     * produced field junk like "Cheema Boilers Limited".
      */
     val isCategorizedFuelPump: Boolean
-        get() = primaryType == "gas_station" || types.contains("gas_station")
+        get() = primaryType == "gas_station"
 }
 
 /**
- * Client-side final guard over Places results, defined by the researched
- * semantics of Google's India data:
+ * Client-side final guard over Places results:
  *
- * 1. Keep only places Google categorizes as petrol pumps
- *    ([PlaceDto.isCategorizedFuelPump]) — this drops junk whose stray
- *    secondary `gas_station` type slipped past the request filter.
- * 2. NEVER return an empty list when raw results were non-empty: if
- *    verification disqualifies everything (a Google data quirk), fall back
- *    to the raw results. Junk may be visible, but a taxi driver always gets
- *    the screen's core function — a station list — rather than nothing.
+ * Keep ONLY places whose primary type is `gas_station`
+ * ([PlaceDto.isCategorizedFuelPump]). This is a strict filter — it CAN return
+ * an empty list. When verification empties the Places results, the repository
+ * relies on OSM/Overpass results only (with an honest "no stations found"
+ * state if those are empty too). Unverified Places POIs are NEVER shown.
  */
 object PlacesFuelFilter {
-    fun select(raw: List<PlaceDto>): List<PlaceDto> {
-        val verified = raw.filter { it.isCategorizedFuelPump }
-        return if (verified.isNotEmpty() || raw.isEmpty()) verified else raw
-    }
+    fun select(raw: List<PlaceDto>): List<PlaceDto> = raw.filter { it.isCategorizedFuelPump }
 }
 
 @Serializable

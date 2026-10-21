@@ -8,10 +8,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Codifies the researched semantics of how Google Places categorizes Indian
- * petrol pumps, and the never-blank guarantee of [PlacesFuelFilter]:
- * junk is dropped when Google categorizes it otherwise, but a categorization
- * quirk can never empty the station list.
+ * Places verification is PRIMARY-TYPE-ONLY: a POI counts as a petrol pump
+ * exclusively when Google's primary category is `gas_station`. A secondary
+ * `gas_station` in types[] must NOT pass (that hole produced field junk like
+ * "Cheema Boilers Limited", "Teleperformance Mohali").
  */
 class PlacesFuelFilterTest {
 
@@ -21,51 +21,58 @@ class PlacesFuelFilterTest {
         primaryType: String? = null,
     ) = PlaceDto(id = id, types = types, primaryType = primaryType)
 
-    // --- positive-evidence property ----------------------------------------
-
     @Test
-    fun `real petrol pump - primary type gas_station - is categorized`() {
-        assertTrue(place(id = "ioc", primaryType = "gas_station", types = listOf("gas_station", "point_of_interest")).isCategorizedFuelPump)
+    fun `real petrol pump - primary type gas_station - passes`() {
+        val pump = place(
+            id = "ioc",
+            types = listOf("gas_station", "point_of_interest", "establishment"),
+            primaryType = "gas_station",
+        )
+        assertTrue(pump.isCategorizedFuelPump)
+        assertEquals(listOf(pump), PlacesFuelFilter.select(listOf(pump)))
     }
 
     @Test
-    fun `pump typed gas_station only as secondary - positively categorized`() {
-        assertTrue(place(types = listOf("store", "gas_station")).isCategorizedFuelPump)
+    fun `secondary gas_station type alone must NOT pass the filter`() {
+        val junk = place(id = "tele", types = listOf("office", "gas_station"), primaryType = "office")
+        assertFalse(junk.isCategorizedFuelPump)
+        assertTrue(PlacesFuelFilter.select(listOf(junk)).isEmpty())
     }
 
     @Test
-    fun `junk POIs are not positively categorized`() {
-        // Field-reported junk: miscategorized businesses near Mohali.
-        assertFalse(place(id = "cheema", primaryType = "corporate_office", types = listOf("corporate_office", "point_of_interest")).isCategorizedFuelPump)
-        assertFalse(place(id = "teleperformance", primaryType = "office", types = listOf("office", "point_of_interest")).isCategorizedFuelPump)
+    fun `junk businesses fail the filter`() {
+        // Field-reported junk near Mohali.
+        val cheema = place(id = "cheema", types = listOf("corporate_office", "point_of_interest"), primaryType = "corporate_office")
+        val tele = place(id = "tele", types = listOf("office", "point_of_interest"), primaryType = "office")
+        val boiler = place(id = "boiler", types = listOf("establishment"), primaryType = "establishment")
+        assertFalse(cheema.isCategorizedFuelPump)
+        assertFalse(tele.isCategorizedFuelPump)
+        assertFalse(boiler.isCategorizedFuelPump)
     }
 
     @Test
-    fun `absence of type info is NOT positive evidence`() {
+    fun `absence of type info is NOT verification`() {
         assertFalse(place().isCategorizedFuelPump)
     }
 
-    // --- filter behavior ----------------------------------------------------
-
     @Test
-    fun `junk filtered out, real pumps kept`() {
+    fun `select keeps only primaryTyped gas_station from a mixed result set`() {
         val raw = listOf(
-            place(id = "cheema", primaryType = "corporate_office", types = listOf("corporate_office", "point_of_interest")),
-            place(id = "ioc", primaryType = "gas_station", types = listOf("gas_station", "point_of_interest")),
-            place(id = "teleperformance", primaryType = "office", types = listOf("office", "point_of_interest")),
+            place(id = "cheema", types = listOf("corporate_office", "point_of_interest"), primaryType = "corporate_office"),
+            place(id = "ioc", types = listOf("gas_station", "point_of_interest"), primaryType = "gas_station"),
+            place(id = "tele", types = listOf("office", "gas_station"), primaryType = "office"),
         )
         val selected = PlacesFuelFilter.select(raw)
         assertEquals(listOf("ioc"), selected.map { it.id })
     }
 
     @Test
-    fun `verification emptying the list falls back to raw results - never blank`() {
+    fun `verification emptying the list STAYS empty - raw results are never shown`() {
         val raw = listOf(
-            place(id = "cheema", primaryType = "corporate_office", types = listOf("corporate_office", "point_of_interest")),
+            place(id = "cheema", types = listOf("corporate_office"), primaryType = "corporate_office"),
             place(id = "typeless"),
         )
-        val selected = PlacesFuelFilter.select(raw)
-        assertEquals(raw, selected)
+        assertTrue(PlacesFuelFilter.select(raw).isEmpty())
     }
 
     @Test

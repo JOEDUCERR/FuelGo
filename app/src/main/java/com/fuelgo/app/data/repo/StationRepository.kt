@@ -35,19 +35,21 @@ import java.util.concurrent.atomic.AtomicBoolean
  * fuel:petrol / fuel:cng) that power the fuel-type filter. Without a key, OSM
  * alone is used.
  *
- * The client DOES re-verify Places results — but positively-safely
- * (`PlacesFuelFilter`): only places Google categorizes as petrol pumps
- * (primary type `gas_station`) are kept, and if verification would empty the
- * list, the raw results are kept instead (a data quirk can show junk names
- * but can never blank the screen). Zero-result refreshes are surfaced via
- * [lastRefreshError] / [lastDataNotice] so the UI can tell "offline" apart
- * from "network OK, no data".
+ * The client re-verifies Places results with primary-type-only strictness
+ * (`PlacesFuelFilter`): only places whose primary type is `gas_station` are
+ * kept. If verification empties the Places results, OSM/Overpass results
+ * alone are used; if BOTH providers have nothing, the refresh honestly
+ * reports "no stations found within 10 km" via [lastDataNotice] instead of
+ * ever showing unverified Places POIs. Zero-result refreshes are surfaced
+ * via [lastRefreshError] / [lastDataNotice] so the UI can tell "offline"
+ * apart from "network OK, no data".
  */
 class StationRepository(
     private val stationDao: StationDao,
     private val overpassApi: OverpassApi,
     private val placesApi: PlacesApiHandle?,
     private val clock: () -> Long = { System.currentTimeMillis() },
+    private val debugLog: (String) -> Unit = { Log.d(TAG, it) },
 ) {
 
     /** Bundled Places client + key, or null when no key is configured. */
@@ -75,6 +77,7 @@ class StationRepository(
             val anySuccess = AtomicBoolean(false)
             val errors = ConcurrentLinkedQueue<String>()
             var merged: List<Station> = emptyList()
+            lastDataNotice = null
 
             coroutineScope {
                 val osmDeferred: Deferred<List<Station>> = async {
@@ -101,8 +104,7 @@ class StationRepository(
                 val fromOsm = osmDeferred.await()
                 val fromPlaces = placesDeferred?.await() ?: emptyList()
                 merged = StationOps.merge(fromPlaces, fromOsm)
-                Log.d(
-                    TAG,
+                debugLog(
                     "refresh(lat=$lat, lon=$lon, fuel=$fuelType): " +
                         "places=${fromPlaces.size}, osm=${fromOsm.size}, merged=${merged.size}, " +
                         "ok=${anySuccess.get()}, errors=[${errors.joinToString("; ")}]",
@@ -112,11 +114,11 @@ class StationRepository(
             lastRefreshError = errors.joinToString("; ").ifBlank { null }
             if (merged.isEmpty()) {
                 if (anySuccess.get()) {
-                    // Providers reachable but zero data — NOT an offline case.
-                    // Record it so the UI can say this explicitly instead of
-                    // spinning forever or blaming the connection.
+                    // Providers reachable but zero data — NOT an offline case,
+                    // and never a place for unverified POIs.
                     lastRefreshError = "network OK, but 0 stations merged within " +
                         "${OverpassQueries.RADIUS_M / 1000} km"
+                    lastDataNotice = "No fuel stations found within ${OverpassQueries.RADIUS_M / 1000} km."
                     return@withContext true
                 }
                 return@withContext false
@@ -141,11 +143,11 @@ class StationRepository(
         private set
 
     /**
-     * Data-quality caveat for the LAST refresh that SUCCEEDED but came back
-     * degraded — e.g. Places results all failed pump verification and
-     * [PlacesFuelFilter]'s never-blank fallback is showing uncategorized
-     * results. Null when the last refresh was fully clean. Read even when
-     * [refresh] returned true, unlike [lastRefreshError].
+     * Honest caveat for the LAST refresh: set when providers simply returned
+     * no verified stations (empty area, or Places results all failed
+     * verification and OSM had nothing either). Null when the last refresh
+     * produced data or failed outright. Read even when [refresh] returned
+     * true, unlike [lastRefreshError].
      */
     @Volatile
     var lastDataNotice: String? = null
@@ -242,17 +244,11 @@ class StationRepository(
         rawPlacesResultCount = response.places.size
         val verified = PlacesFuelFilter.select(response.places)
         if (verified.size < response.places.size) {
-            Log.d(TAG, "places filter: kept ${verified.size}/${response.places.size} typed gas_station")
+            debugLog("places filter: kept ${verified.size}/${response.places.size} primaryTyped gas_station")
         }
-        if (response.places.isNotEmpty() && verified.isEmpty()) {
-            // Verification disqualified everything — the never-blank fallback
-            // serves Google's raw (possibly junky) results. Tell the user
-            // rather than presenting junk as fact.
-            lastDataNotice = "${response.places.size} places came back but none are " +
-                "categorized as petrol pumps by Google — showing uncategorized results"
-        } else {
-            lastDataNotice = null
-        }
+        // No fallback: if verified is empty the repository falls through to
+        // OSM-only, and if both are empty the refresh reports the honest
+        // empty state. Unverified Places POIs are never shown.
         return verified
             .mapNotNull { place ->
                 val loc = place.location ?: return@mapNotNull null
