@@ -144,18 +144,42 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             } catch (e: Exception) {
                 false
             }
-            loadFromCache()
-            _state.update {
-                it.copy(
-                    loading = false,
-                    error = if (networkOk) {
-                        null
-                    } else {
-                        val detail = container.stationRepository.lastRefreshError
-                        "Couldn't fetch stations" + (detail?.let { d -> " — $d" } ?: "") +
-                            ". Tap Try again in a moment."
-                    },
+            val ranked = container.stationRepository
+                .cachedNearby(lat, lon, snap.fuelType)
+            val reports = container.reportRepository
+                .recentReports(ranked.map { it.first.id })
+            val now = System.currentTimeMillis()
+            val at = ZonedDateTime.now()
+            val rows = ranked.map { (station, distance) ->
+                val effective = StatusAggregator.effective(
+                    hoursStatus(station.rawOpeningHours, at),
+                    reports[station.id] ?: emptyList(),
+                    now,
                 )
+                StationUi(station, distance, effective.status, effective.crowd)
+            }
+            WidgetRefresher.updateFromCache(container.appContext)
+            val detail = container.stationRepository.lastRefreshError
+            val errorMessage = when {
+                // Fresh data on screen — never nag.
+                rows.isNotEmpty() && networkOk -> null
+                // Cache carries the UI after a failed refresh.
+                rows.isNotEmpty() && !networkOk ->
+                    "Couldn't refresh — showing cached stations." +
+                        (detail?.let { d -> " ($d)" } ?: "")
+                // Completely empty: say which situation we're actually in.
+                networkOk ->
+                    "Network is reachable, but the data sources returned no fuel " +
+                        "stations within 10 km." +
+                        (detail?.let { d -> " ($d)" } ?: "") +
+                        " Try again in a moment."
+                else ->
+                    "Couldn't reach the station data sources." +
+                        (detail?.let { d -> " ($d)" } ?: " Check your connection.") +
+                        " Tap Try again in a moment."
+            }
+            _state.update {
+                it.copy(stations = rows, loading = false, error = errorMessage)
             }
         }
     }

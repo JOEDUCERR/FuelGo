@@ -32,16 +32,20 @@ data class OverpassCenter(val lat: Double, val lon: Double)
 
 object OverpassQueries {
 
-    private const val RADIUS_M = 5000
+    /**
+     * Search radius shared with the Places fetch. 10 km covers a full taxi
+     * run's worth of pumps; the nearest real pump can easily sit beyond 4 km.
+     */
+    const val RADIUS_M = 10_000
 
     fun fuelAround(lat: Double, lon: Double): String =
         """
-        [out:json][timeout:15];
+        [out:json][timeout:20];
         (
           node["amenity"="fuel"](around:$RADIUS_M,$lat,$lon);
           way["amenity"="fuel"](around:$RADIUS_M,$lat,$lon);
         );
-        out center 80;
+        out center 120;
         """.trimIndent()
 }
 

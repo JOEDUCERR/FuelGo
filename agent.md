@@ -44,17 +44,29 @@ over-build. Every feature below is scoped to keep total effort small.
 Providers fetched in parallel and merged when a Places key is configured:
 
 - **Google Places API (New)** — Nearby Search, `includedTypes: ["gas_station"]`,
-  field mask including `places.types`/`places.primaryType`. Results are
-  validated permissively-safe client-side: a POI is dropped only when Google
-  explicitly categorizes it as something OTHER than gas_station; POIs with no
-  type info at all are kept (unknown != absent) so a categorization quirk can
-  never empty the list. `StationRepository.lastRefreshError` records
-  per-provider failure reasons (mirrors, HTTP failures, filter outcomes) for
-  on-device diagnosability in the error banner.
+  field mask including `places.types`/`places.primaryType`. The client does
+  NOT re-validate results by category — Google already filters server-side,
+  and a client-side re-filter can only shrink the list toward zero when
+  Google's India categorization is imperfect (it emptied station lists in the
+  field). Incoming data-quality junk is visible by name instead of blanking
+  the screen.
 - **OpenStreetMap Overpass API** — free, keyless, default when no Places key.
   Multiple mirrors are tried in order (`overpass-api.de` → `kumi.systems` →
   `private.coffee` → `maps.mail.ru`) because instances throttle or refuse some
-  IPs; first success wins.
+  IPs; first success wins. The whole mirror loop is capped at 20 s so OSM
+  never holds a refresh hostage after Places already answered.
+
+Both providers search a **10 km radius** (the nearest real pump in sparse
+areas can sit beyond 4 km; 5 km left too thin a margin).
+
+Refresh honesty: `StationRepository.lastRefreshError` records per-provider
+failure reasons as human-readable text (mirrors, HTTP errors, filter
+outcomes) for on-device diagnosability. A refresh where providers respond but
+zero stations merge is a SUCCESS with an explicit
+"network OK, but 0 stations merged within 10 km" diagnostic — never mistaken
+for "offline". `AppViewModel.refresh` maps every outcome to a truthful banner:
+fresh data (no banner), cached fallback ("showing cached"), network-OK-but-
+empty (says so), and offline (with detail).
 
 Merge rules (see `StationOps.merge`): records within ~30 m of each other
 collapse into one — Places name/id/hours survive, and OSM fuel tags

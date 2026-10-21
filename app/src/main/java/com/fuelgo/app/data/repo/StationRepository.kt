@@ -1,5 +1,6 @@
 package com.fuelgo.app.data.repo
 
+import android.util.Log
 import com.fuelgo.app.data.api.OverpassApi
 import com.fuelgo.app.data.api.OverpassQueries
 import com.fuelgo.app.data.api.OverpassMirrors
@@ -13,6 +14,7 @@ import com.fuelgo.app.domain.StationOps
 import com.fuelgo.app.domain.model.FuelType
 import com.fuelgo.app.domain.model.Station
 import com.fuelgo.app.domain.model.StationSource
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -30,8 +32,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * are fetched in parallel and merged — Places contributes better names and
  * quality opening hours, OSM contributes the fuel-type tags (fuel:diesel /
  * fuel:petrol / fuel:cng) that power the fuel-type filter. Without a key, OSM
- * alone is used. Places results are validated client-side so that POIs not
- * categorized as gas_station are dropped.
+ * alone is used.
+ *
+ * The client NEVER re-validates Places results by category: the request
+ * already filters server-side by gas_station, and a client-side re-filter can
+ * only shrink the list toward zero when Google's categorization is imperfect —
+ * which emptied station lists in the field. Zero-result refreshes are surfaced
+ * via [lastRefreshError] so the UI can tell "offline" apart from "network OK,
+ * no data".
  */
 class StationRepository(
     private val stationDao: StationDao,
@@ -80,10 +88,9 @@ class StationRepository(
                 }
                 val placesDeferred: Deferred<List<Station>>? = if (placesApi != null) {
                     async {
-                        runCatching { fetchPlaces(lat, lon) }
-                            .onSuccess { anySuccess.set(true) }
-                            .onFailure { errors.add("places: ${it.message ?: it.javaClass.simpleName}") }
-                            .getOrDefault(emptyList())
+                        safeFetch(Errors.PLACES_TAG, errors) { fetchPlaces(lat, lon) }
+                            .also { if (it != null) anySuccess.set(true) }
+                            .orEmpty()
                     }
                 } else {
                     null
@@ -91,14 +98,27 @@ class StationRepository(
 
                 val fromOsm = osmDeferred.await()
                 val fromPlaces = placesDeferred?.await() ?: emptyList()
-                if (rawPlacesResultCount > 0 && fromPlaces.isEmpty()) {
-                    errors.add("places: $rawPlacesResultCount results, none categorized as gas_station")
-                }
                 merged = StationOps.merge(fromPlaces, fromOsm)
+                Log.d(
+                    TAG,
+                    "refresh(lat=$lat, lon=$lon, fuel=$fuelType): " +
+                        "places=${fromPlaces.size}, osm=${fromOsm.size}, merged=${merged.size}, " +
+                        "ok=${anySuccess.get()}, errors=[${errors.joinToString("; ")}]",
+                )
             }
 
             lastRefreshError = errors.joinToString("; ").ifBlank { null }
-            if (merged.isEmpty()) return@withContext anySuccess.get()
+            if (merged.isEmpty()) {
+                if (anySuccess.get()) {
+                    // Providers reachable but zero data — NOT an offline case.
+                    // Record it so the UI can say this explicitly instead of
+                    // spinning forever or blaming the connection.
+                    lastRefreshError = "network OK, but 0 stations merged within " +
+                        "${OverpassQueries.RADIUS_M / 1000} km"
+                    return@withContext true
+                }
+                return@withContext false
+            }
             stationDao.upsertAll(merged.map { it.toEntity(now) })
             stationDao.pruneOlderThan(now - StationOps.CACHE_TTL_MS)
             anySuccess.get()
@@ -119,6 +139,34 @@ class StationRepository(
     /** Total wall-clock budget for the whole Overpass mirror loop. */
     private val OSM_TOTAL_TIMEOUT_MS = 20_000L
 
+    /** Search radius for both providers (Places circle + Overpass query). */
+    private val SEARCH_RADIUS_M = OverpassQueries.RADIUS_M.toDouble()
+
+    private companion object {
+        const val TAG = "FuelGo"
+    }
+
+    /** Failure-reason tag prefixes for the two providers. */
+    private object Errors {
+        const val PLACES_TAG = "places"
+        const val OSM_TAG = "osm"
+    }
+
+    /**
+     * Cancellation-safe replacement for `runCatching` on suspend calls:
+     * sleeps/errors are recorded, but [CancellationException] is always
+     * rethrown so coroutine cancellation and our timeouts keep working.
+     */
+    private suspend fun <T> safeFetch(tag: String, errors: ConcurrentLinkedQueue<String>, block: suspend () -> T): T? =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            errors.add("$tag: ${e.message ?: e.javaClass.simpleName}")
+            null
+        }
+
     /** Tries each Overpass mirror in turn; null only when every mirror fails. */
     private suspend fun fetchOverpassFirst(
         lat: Double,
@@ -128,9 +176,14 @@ class StationRepository(
         for (url in OverpassMirrors.urls) {
             val mirror = url.substringBefore("/api/")
                 .removePrefix("https://").removePrefix("http://")
-            val result = runCatching { fetchOverpass(url, lat, lon) }
-                .onFailure { onMirrorError(mirror, it.message ?: it.javaClass.simpleName) }
-                .getOrNull()
+            val result = try {
+                fetchOverpass(url, lat, lon)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                onMirrorError(mirror, e.message ?: e.javaClass.simpleName)
+                null
+            }
             if (result != null) return result
         }
         return null
@@ -163,13 +216,12 @@ class StationRepository(
             apiKey = handle.apiKey,
             body = NearbySearchRequest(
                 locationRestriction = LocationRestriction(
-                    circle = Circle(center = Center(lat, lon), radius = 5000.0),
+                    circle = Circle(center = Center(lat, lon), radius = SEARCH_RADIUS_M.toDouble()),
                 ),
             ),
         )
         rawPlacesResultCount = response.places.size
         return response.places
-            .filter { it.isFuelStation } // drop POIs Google does not categorize as fuel
             .mapNotNull { place ->
                 val loc = place.location ?: return@mapNotNull null
                 Station(

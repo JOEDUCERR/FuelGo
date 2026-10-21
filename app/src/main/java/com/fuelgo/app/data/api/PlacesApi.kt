@@ -6,8 +6,14 @@ import retrofit2.http.Header
 import retrofit2.http.POST
 
 /**
- * Google Places API (New) — Nearby Search. Used as the primary provider when a
- * `PLACES_API_KEY` is configured; OSM Overpass remains the fallback.
+ * Google Places API (New) — Nearby Search. Used alongside OSM when a
+ * `PLACES_API_KEY` is configured.
+ *
+ * NOTE: the client intentionally does NOT re-verify the returned POIs'
+ * categories. The request already filters server-side by gas_station;
+ * a client-side re-filter can only ever shrink the list toward zero when
+ * Google's India categorization is imperfect — which emptied station lists in
+ * the field. Data-quality junk (if any) is visible by name instead.
  */
 interface PlacesApi {
 
@@ -48,17 +54,7 @@ data class PlaceDto(
     val regularOpeningHours: RegularOpeningHoursDto? = null,
     val types: List<String> = emptyList(),
     val primaryType: String? = null,
-) {
-    /**
-     * Fuel-station check, permissive-safe: only DROP a POI when Google
-     * explicitly categorizes it as something else. A POI with NO type info at
-     * all is kept (unknown != absent) so a data quirk can't empty the list.
-     */
-    val isFuelStation: Boolean
-        get() = primaryType == "gas_station" ||
-            types.contains("gas_station") ||
-            (primaryType == null && types.isEmpty())
-}
+)
 
 @Serializable
 data class DisplayNameDto(val text: String? = null)
