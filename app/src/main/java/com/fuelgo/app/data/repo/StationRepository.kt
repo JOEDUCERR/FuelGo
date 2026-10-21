@@ -16,12 +16,16 @@ import com.fuelgo.app.domain.model.FuelType
 import com.fuelgo.app.domain.model.Station
 import com.fuelgo.app.domain.model.StationSource
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import retrofit2.HttpException
+import java.io.IOException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -49,6 +53,7 @@ class StationRepository(
     private val overpassApi: OverpassApi,
     private val placesApi: PlacesApiHandle?,
     private val clock: () -> Long = { System.currentTimeMillis() },
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val debugLog: (String) -> Unit = { Log.d(TAG, it) },
 ) {
 
@@ -72,7 +77,7 @@ class StationRepository(
      * Failure reasons are collected into [lastRefreshError] for diagnosability.
      */
     suspend fun refresh(lat: Double, lon: Double, fuelType: FuelType): Boolean =
-        withContext(Dispatchers.IO) {
+        withContext(ioDispatcher) {
             val now = clock()
             val anySuccess = AtomicBoolean(false)
             val errors = ConcurrentLinkedQueue<String>()
@@ -160,6 +165,12 @@ class StationRepository(
     /** Total wall-clock budget for the whole Overpass mirror loop. */
     private val OSM_TOTAL_TIMEOUT_MS = 20_000L
 
+    /** Per-mirror budget: one slow mirror must not eat the rest's budget. */
+    private val MIRROR_TIMEOUT_MS = 6_000L
+
+    /** Wait before the single Places 5xx/IO retry. */
+    private val PLACES_RETRY_DELAY_MS = 1_000L
+
     /** Search radius for both providers (Places circle + Overpass query). */
     private val SEARCH_RADIUS_M = OverpassQueries.RADIUS_M.toDouble()
 
@@ -174,6 +185,22 @@ class StationRepository(
     }
 
     /**
+     * Human-readable failure reason with HTTP status and the first 200 chars
+     * of the error body (Google/Overpass diagnostics — never the API key,
+     * which is only in request headers) e.g. "http 500: {\"error\":…" —
+     * surfaced in [lastRefreshError].
+     */
+    private fun failureMessage(e: Exception): String = when (e) {
+        is HttpException -> {
+            val body = runCatching {
+                e.response()?.errorBody()?.use { it.string() }
+            }.getOrNull()
+            "http ${e.code()}" + (body?.take(200)?.let { ": $it" } ?: "")
+        }
+        else -> e.message ?: e.javaClass.simpleName
+    }
+
+    /**
      * Cancellation-safe replacement for `runCatching` on suspend calls:
      * sleeps/errors are recorded, but [CancellationException] is always
      * rethrown so coroutine cancellation and our timeouts keep working.
@@ -184,7 +211,7 @@ class StationRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            errors.add("$tag: ${e.message ?: e.javaClass.simpleName}")
+            errors.add("$tag: ${failureMessage(e)}")
             null
         }
 
@@ -198,14 +225,20 @@ class StationRepository(
             val mirror = url.substringBefore("/api/")
                 .removePrefix("https://").removePrefix("http://")
             val result = try {
-                fetchOverpass(url, lat, lon)
+                // Per-mirror cap: a stalled mirror here costs this mirror only
+                // its own 6 s, not the remaining mirrors' budget.
+                withTimeoutOrNull(MIRROR_TIMEOUT_MS) { fetchOverpass(url, lat, lon) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                onMirrorError(mirror, e.message ?: e.javaClass.simpleName)
+                onMirrorError(mirror, failureMessage(e))
                 null
             }
-            if (result != null) return result
+            if (result == null) {
+                onMirrorError(mirror, "timed out after ${MIRROR_TIMEOUT_MS / 1000}s")
+                continue
+            }
+            return result
         }
         return null
     }
@@ -231,16 +264,42 @@ class StationRepository(
         }
     }
 
+    /**
+     * Places resilience: transient server problems (HTTP 5xx, IOException)
+     * get exactly ONE retry after a short pause; 4xx (key/config errors)
+     * fail immediately — retrying can't fix those and burns quota.
+     */
+    private suspend fun <T> withPlacesRetry(block: suspend () -> T): T =
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpException) {
+            if (e.code() >= 500) {
+                debugLog("places: transient http ${e.code()} — retrying once")
+                delay(PLACES_RETRY_DELAY_MS)
+                block()
+            } else {
+                throw e
+            }
+        } catch (e: IOException) {
+            debugLog("places: transient IO failure — retrying once")
+            delay(PLACES_RETRY_DELAY_MS)
+            block()
+        }
+
     private suspend fun fetchPlaces(lat: Double, lon: Double): List<Station> {
         val handle = placesApi ?: error("Places API not configured")
-        val response = handle.api.searchNearby(
-            apiKey = handle.apiKey,
-            body = NearbySearchRequest(
-                locationRestriction = LocationRestriction(
-                    circle = Circle(center = Center(lat, lon), radius = SEARCH_RADIUS_M.toDouble()),
+        val response = withPlacesRetry {
+            handle.api.searchNearby(
+                apiKey = handle.apiKey,
+                body = NearbySearchRequest(
+                    locationRestriction = LocationRestriction(
+                        circle = Circle(center = Center(lat, lon), radius = SEARCH_RADIUS_M.toDouble()),
+                    ),
                 ),
-            ),
-        )
+            )
+        }
         rawPlacesResultCount = response.places.size
         val verified = PlacesFuelFilter.select(response.places)
         if (verified.size < response.places.size) {
