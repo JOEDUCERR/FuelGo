@@ -52,16 +52,24 @@ Providers fetched in parallel and merged when a Places key is configured:
   India data lets miscategorized businesses (e.g. "Cheema Boilers Limited",
   "Teleperformance") match on a stray secondary type — which is why the
   request filters on the PRIMARY type server-side, and results additionally
-  pass client-side positive-evidence verification (`PlacesFuelFilter`):
-  a POI is kept only if Google categorizes it `gas_station` (primary or
-  listed). If verification would empty the list (a Google data quirk), the
-  raw results are shown instead — junk may be visible, but the station list
-  can never be blank, and the UI shows a truthful "Note: … none are
-  categorized as petrol pumps" banner (`lastDataNotice`). Failed refreshes
-  surface per-provider reasons via `lastRefreshError`.
+  pass client-side primary-type-only verification (`PlacesFuelFilter`): a
+  POI is kept ONLY when its primaryType is `gas_station`; a secondary
+  `gas_station` in `types[]` does NOT pass. If verification empties the
+  Places results, the app relies on OSM/Overpass results only; if both
+  providers have nothing, the UI shows an honest
+  "No fuel stations found within 10 km" state (`lastDataNotice`) — raw,
+  unverified Places POIs are never shown. Failed refreshes surface
+  per-provider reasons via `lastRefreshError`.
   After each successful refresh the cache is purged to exactly what
   providers currently return — previously fetched junk/POIs no longer
   returned are deleted immediately, not on the 7-day TTL.
+  - **The shared Json instance (`AppJson`) MUST keep `encodeDefaults = true`
+    or request filters are silently dropped (kotlinx.serialization omits
+    default-valued properties). Covered by a regression test
+    (`PlacesRequestRegressionTest`), which serializes with the same instance
+    AppContainer's Retrofit converter uses.
+  Debug builds log full request/response bodies at Level.BODY with the
+  Places API key header redacted; release builds log nothing.
 - **OpenStreetMap Overpass API** — free, keyless, default when no Places key.
   Multiple mirrors are tried in order (`overpass-api.de` → `kumi.systems` →
   `private.coffee` → `maps.mail.ru`) because instances throttle or refuse some
