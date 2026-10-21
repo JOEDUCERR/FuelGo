@@ -58,7 +58,18 @@ fun HomeScreen(state: AppState, vm: AppViewModel) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
-        if (grants.values.any { it }) vm.refresh() else vm.onPermissionDenied()
+        val granted = grants.values.any { it }
+        vm.onLocationPermission(granted)
+        if (!granted) vm.onPermissionDenied()
+    }
+
+    val requestPermissions: () -> Unit = {
+        permissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+            ),
+        )
     }
 
     LaunchedEffect(Unit) {
@@ -67,13 +78,10 @@ fun HomeScreen(state: AppState, vm: AppViewModel) {
         ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
             context, Manifest.permission.ACCESS_COARSE_LOCATION,
         ) == PackageManager.PERMISSION_GRANTED
-        if (granted) vm.refresh()
-        else permissionLauncher.launch(
-            arrayOf(
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION,
-            ),
-        )
+        // Reports the live permission state (cold start included) and, on
+        // grant, triggers the refresh immediately — no re-open needed.
+        vm.onLocationPermission(granted)
+        if (!granted) requestPermissions()
     }
 
     LaunchedEffect(state.message) {
@@ -135,18 +143,56 @@ fun HomeScreen(state: AppState, vm: AppViewModel) {
                 }
             }
 
-            if (state.stations.isEmpty() && !state.loading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "No stations cached yet.\n" +
-                                (state.error ?: "Enable location and check your connection."),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(16.dp))
-                        Button(onClick = { vm.refresh() }) {
-                            Text("Try again")
+            if (state.stations.isEmpty()) {
+                val emptyState = emptyStateFor(
+                    hasPermission = state.hasLocationPermission,
+                    hasFix = state.hasFix,
+                    loading = state.loading,
+                    outcome = state.lastOutcome,
+                )
+                if (emptyState != null &&
+                    (emptyState.kind == EmptyStateKind.WAITING_LOCATION || !state.loading)
+                ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = emptyState.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            emptyState.detail?.let { detail ->
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = detail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            when (emptyState.primaryAction) {
+                                EmptyStateAction.RETRY -> {
+                                    Spacer(Modifier.height(16.dp))
+                                    Button(onClick = { vm.refresh() }) {
+                                        Text("Try again")
+                                    }
+                                }
+                                EmptyStateAction.GRANT -> {
+                                    Spacer(Modifier.height(16.dp))
+                                    Button(onClick = requestPermissions) {
+                                        Text("Grant location")
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            val intent = android.content.Intent(
+                                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                                android.net.Uri.fromParts("package", context.packageName, null),
+                                            )
+                                            context.startActivity(intent)
+                                        },
+                                    ) { Text("Open settings") }
+                                }
+                                EmptyStateAction.NONE -> Unit
+                                EmptyStateAction.OPEN_SETTINGS -> Unit
+                            }
                         }
                     }
                 }

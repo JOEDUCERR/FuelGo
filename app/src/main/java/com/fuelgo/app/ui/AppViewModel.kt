@@ -40,6 +40,12 @@ data class AppState(
     val showSettings: Boolean = false,
     val message: String? = null,
     val widgetRefreshMinutes: Int = 15,
+    /** null = not yet resolved; false = cold-start state (a). */
+    val hasLocationPermission: Boolean? = null,
+    /** true = a location (last-known or fresh) is available for ranking. */
+    val hasFix: Boolean = false,
+    /** Summarized result of the last refresh — drives empty states (c)/(d). */
+    val lastOutcome: LastOutcome? = null,
 )
 
 class AppViewModel(private val container: AppContainer) : ViewModel() {
@@ -114,7 +120,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 )
                 StationUi(station, distance, effective.status, effective.crowd)
             }
-            _state.update { it.copy(stations = rows) }
+            _state.update { it.copy(stations = rows, hasFix = true) }
             WidgetRefresher.updateFromCache(container.appContext)
         }
     }
@@ -124,7 +130,9 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = null) }
             val snap = container.prefs.snapshot()
-            val loc = container.locationClient.currentOrNull()
+            // One-shot fresh fix with a sensible timeout; the client already
+            // prefers last-known and falls back to it if providers stall.
+            val loc = container.locationClient.currentOrNull(timeoutMs = 8000)
             if (loc != null) {
                 container.prefs.saveLastLocation(loc.latitude, loc.longitude)
             }
@@ -134,6 +142,8 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 _state.update {
                     it.copy(
                         loading = false,
+                        hasFix = false,
+                        lastOutcome = null,
                         error = "Location unavailable — allow location access and retry.",
                     )
                 }
@@ -181,14 +191,38 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                         " Tap Try again in a moment."
             }
             _state.update {
-                it.copy(stations = rows, loading = false, error = errorMessage)
+                val outcome = when {
+                    !networkOk -> LastOutcome.PROVIDERS_FAILED
+                    rows.isEmpty() -> LastOutcome.OK_EMPTY
+                    else -> LastOutcome.OK_DATA
+                }
+                it.copy(
+                    stations = rows,
+                    loading = false,
+                    hasFix = true,
+                    lastOutcome = outcome,
+                    error = errorMessage,
+                )
             }
         }
     }
 
+    /**
+     * Home screen reports the live permission state (cold start + user
+     * grant/denial). A fresh GRANT triggers an immediate refresh so the user
+     * never has to reopen the app after the dialog.
+     */
+    fun onLocationPermission(granted: Boolean) {
+        _state.update { it.copy(hasLocationPermission = granted) }
+        if (granted) refresh()
+    }
+
     fun onPermissionDenied() {
         _state.update {
-            it.copy(error = "Location permission needed to find nearby pumps.")
+            it.copy(
+                hasLocationPermission = false,
+                error = "Location permission needed to find nearby pumps.",
+            )
         }
     }
 
