@@ -79,6 +79,17 @@ Providers fetched in parallel and merged when a Places key is configured:
 Both providers search a **10 km radius** (the nearest real pump in sparse
 areas can sit beyond 4 km; 5 km left too thin a margin).
 
+Overpass transport notes: Overpass instances reject requests without an
+identifying User-Agent with **HTTP 406** (proven by direct replay, Oct 2026 —
+see `AppContainer.overpassClient`, which sends
+`FuelGo/<version> (Android; personal project)` + `Accept: */*`) and the query
+is sent as the documented POST form body (`data=…`). Each mirror gets its own
+**6 s budget** (OkHttp callTimeout + a repository-level cap) inside the 20 s
+overall loop; 406/429/5xx/timeouts/IO errors move to the next mirror and each
+failure is recorded separately in `lastRefreshError`. Note: a fresh install
+or cleared app data resets the runtime location permission — the first Home
+launch re-requests it and a grant immediately triggers a refresh.
+
 Refresh honesty: `StationRepository.lastRefreshError` records per-provider
 failure reasons as human-readable text (mirrors, HTTP errors, filter
 outcomes) for on-device diagnosability. A refresh where providers respond but
