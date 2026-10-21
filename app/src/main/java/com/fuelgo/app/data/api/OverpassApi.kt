@@ -40,7 +40,7 @@ object OverpassQueries {
 
     fun fuelAround(lat: Double, lon: Double): String =
         """
-        [out:json][timeout:20];
+        [out:json][timeout:10];
         (
           node["amenity"="fuel"](around:$RADIUS_M,$lat,$lon);
           way["amenity"="fuel"](around:$RADIUS_M,$lat,$lon);

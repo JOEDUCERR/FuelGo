@@ -59,20 +59,45 @@ class AppContainer(val appContext: Context) {
         Log.d(TAG, API_KEY_REDACTION.replace(message, "X-Goog-Api-Key: REDACTED"))
     }.apply { level = HttpLoggingInterceptor.Level.BODY }
 
-    private val okHttp = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        // Overpass instances can be slow under load; give each mirror time.
+    private fun OkHttpClient.Builder.debugLogs(): OkHttpClient.Builder =
+        if (BuildConfig.DEBUG) addInterceptor(httpLogger) else this
+
+    /**
+     * Overpass instances reject requests without an identifying User-Agent
+     * with HTTP 406 (proven from the field and by direct replay: identical
+     * body → 406 with okhttp's default UA, 2xx/other with a named UA). The
+     * client therefore declares a FuelGo UA + permissive Accept, and caps
+     * EVERY mirror call at [callTimeout] 6 s so one slow mirror cannot eat
+     * the repository's whole 20 s budget.
+     */
+    private val overpassClient = OkHttpClient.Builder()
+        .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        .apply {
-            if (BuildConfig.DEBUG) {
-                addInterceptor(httpLogger)
-            }
+        .callTimeout(6, TimeUnit.SECONDS)
+        .addInterceptor { chain ->
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header(
+                        "User-Agent",
+                        "FuelGo/" + BuildConfig.VERSION_NAME + " (Android; personal project)",
+                    )
+                    .header("Accept", "*/*")
+                    .build(),
+            )
         }
+        .debugLogs()
+        .build()
+
+    /** Places is a fast first-class API; no artificial per-call cap. */
+    private val placesClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .debugLogs()
         .build()
 
     private val overpassRetrofit = Retrofit.Builder()
         .baseUrl("https://overpass-api.de/")
-        .client(okHttp)
+        .client(overpassClient)
         .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
         .build()
 
@@ -98,7 +123,7 @@ class AppContainer(val appContext: Context) {
         StationRepository.PlacesApiHandle(
             api = Retrofit.Builder()
                 .baseUrl("https://places.googleapis.com/")
-                .client(okHttp)
+                .client(placesClient)
                 .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
                 .build()
                 .create(PlacesApi::class.java),
