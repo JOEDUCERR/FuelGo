@@ -49,9 +49,15 @@ data class PlaceDto(
     val types: List<String> = emptyList(),
     val primaryType: String? = null,
 ) {
-    /** True only when Google actually categorizes this POI as a fuel station. */
+    /**
+     * Fuel-station check, permissive-safe: only DROP a POI when Google
+     * explicitly categorizes it as something else. A POI with NO type info at
+     * all is kept (unknown != absent) so a data quirk can't empty the list.
+     */
     val isFuelStation: Boolean
-        get() = primaryType == "gas_station" || types.contains("gas_station")
+        get() = primaryType == "gas_station" ||
+            types.contains("gas_station") ||
+            (primaryType == null && types.isEmpty())
 }
 
 @Serializable

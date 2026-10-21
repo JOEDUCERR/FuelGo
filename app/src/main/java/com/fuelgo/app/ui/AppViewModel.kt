@@ -151,8 +151,9 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                     error = if (networkOk) {
                         null
                     } else {
-                        "Couldn't reach the station data service — it may be busy or " +
-                            "temporarily unavailable. Tap Try again in a moment."
+                        val detail = container.stationRepository.lastRefreshError
+                        "Couldn't fetch stations" + (detail?.let { d -> " — $d" } ?: "") +
+                            ". Tap Try again in a moment."
                     },
                 )
             }

@@ -13,10 +13,13 @@ import com.fuelgo.app.domain.StationOps
 import com.fuelgo.app.domain.model.FuelType
 import com.fuelgo.app.domain.model.Station
 import com.fuelgo.app.domain.model.StationSource
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -54,43 +57,80 @@ class StationRepository(
     /**
      * Network refresh. Returns true when at least one provider responded
      * successfully (even for an empty area); cache untouched on total failure.
+     * Failure reasons are collected into [lastRefreshError] for diagnosability.
      */
     suspend fun refresh(lat: Double, lon: Double, fuelType: FuelType): Boolean =
         withContext(Dispatchers.IO) {
             val now = clock()
             val anySuccess = AtomicBoolean(false)
+            val errors = ConcurrentLinkedQueue<String>()
             var merged: List<Station> = emptyList()
 
             coroutineScope {
-                val osmDeferred = async {
-                    fetchOverpassFirst(lat, lon)?.also { anySuccess.set(true) }.orEmpty()
-                }
-                val placesDeferred: kotlinx.coroutines.Deferred<List<Station>>? =
-                    if (placesApi != null) {
-                        async {
-                            runCatching { fetchPlaces(lat, lon) }
-                                .onSuccess { anySuccess.set(true) }
-                                .getOrDefault(emptyList())
-                        }
-                    } else {
-                        null
+                val osmDeferred: Deferred<List<Station>> = async {
+                    val result = withTimeoutOrNull(OSM_TOTAL_TIMEOUT_MS) {
+                        fetchOverpassFirst(lat, lon) { mirror, msg -> errors.add("osm: $mirror — $msg") }
                     }
+                    if (result == null) {
+                        errors.add("osm: no mirror answered within ${OSM_TOTAL_TIMEOUT_MS / 1000}s")
+                        emptyList()
+                    } else {
+                        result.also { anySuccess.set(true) }
+                    }
+                }
+                val placesDeferred: Deferred<List<Station>>? = if (placesApi != null) {
+                    async {
+                        runCatching { fetchPlaces(lat, lon) }
+                            .onSuccess { anySuccess.set(true) }
+                            .onFailure { errors.add("places: ${it.message ?: it.javaClass.simpleName}") }
+                            .getOrDefault(emptyList())
+                    }
+                } else {
+                    null
+                }
 
                 val fromOsm = osmDeferred.await()
                 val fromPlaces = placesDeferred?.await() ?: emptyList()
+                if (rawPlacesResultCount > 0 && fromPlaces.isEmpty()) {
+                    errors.add("places: $rawPlacesResultCount results, none categorized as gas_station")
+                }
                 merged = StationOps.merge(fromPlaces, fromOsm)
             }
 
+            lastRefreshError = errors.joinToString("; ").ifBlank { null }
             if (merged.isEmpty()) return@withContext anySuccess.get()
             stationDao.upsertAll(merged.map { it.toEntity(now) })
             stationDao.pruneOlderThan(now - StationOps.CACHE_TTL_MS)
             anySuccess.get()
         }
 
+    /**
+     * Why the last [refresh] call had problems, human-readable per provider.
+     * Null when the last refresh was fully clean.
+     */
+    @Volatile
+    var lastRefreshError: String? = null
+        private set
+
+    /** Number of places returned by Google before the fuel-station filter. */
+    @Volatile
+    private var rawPlacesResultCount = 0
+
+    /** Total wall-clock budget for the whole Overpass mirror loop. */
+    private val OSM_TOTAL_TIMEOUT_MS = 20_000L
+
     /** Tries each Overpass mirror in turn; null only when every mirror fails. */
-    private suspend fun fetchOverpassFirst(lat: Double, lon: Double): List<Station>? {
+    private suspend fun fetchOverpassFirst(
+        lat: Double,
+        lon: Double,
+        onMirrorError: (mirror: String, message: String) -> Unit,
+    ): List<Station>? {
         for (url in OverpassMirrors.urls) {
-            val result = runCatching { fetchOverpass(url, lat, lon) }.getOrNull()
+            val mirror = url.substringBefore("/api/")
+                .removePrefix("https://").removePrefix("http://")
+            val result = runCatching { fetchOverpass(url, lat, lon) }
+                .onFailure { onMirrorError(mirror, it.message ?: it.javaClass.simpleName) }
+                .getOrNull()
             if (result != null) return result
         }
         return null
@@ -127,6 +167,7 @@ class StationRepository(
                 ),
             ),
         )
+        rawPlacesResultCount = response.places.size
         return response.places
             .filter { it.isFuelStation } // drop POIs Google does not categorize as fuel
             .mapNotNull { place ->

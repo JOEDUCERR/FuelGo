@@ -45,8 +45,12 @@ Providers fetched in parallel and merged when a Places key is configured:
 
 - **Google Places API (New)** — Nearby Search, `includedTypes: ["gas_station"]`,
   field mask including `places.types`/`places.primaryType`. Results are
-  validated client-side: POIs not categorized `gas_station` are dropped (guards
-  against Google data quirks returning industrial/park POIs).
+  validated permissively-safe client-side: a POI is dropped only when Google
+  explicitly categorizes it as something OTHER than gas_station; POIs with no
+  type info at all are kept (unknown != absent) so a categorization quirk can
+  never empty the list. `StationRepository.lastRefreshError` records
+  per-provider failure reasons (mirrors, HTTP failures, filter outcomes) for
+  on-device diagnosability in the error banner.
 - **OpenStreetMap Overpass API** — free, keyless, default when no Places key.
   Multiple mirrors are tried in order (`overpass-api.de` → `kumi.systems` →
   `private.coffee` → `maps.mail.ru`) because instances throttle or refuse some
