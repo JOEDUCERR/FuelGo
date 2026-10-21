@@ -8,6 +8,7 @@ import com.fuelgo.app.data.api.Center
 import com.fuelgo.app.data.api.Circle
 import com.fuelgo.app.data.api.LocationRestriction
 import com.fuelgo.app.data.api.NearbySearchRequest
+import com.fuelgo.app.data.api.PlacesFuelFilter
 import com.fuelgo.app.data.db.StationDao
 import com.fuelgo.app.data.db.StationEntity
 import com.fuelgo.app.domain.StationOps
@@ -34,12 +35,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * fuel:petrol / fuel:cng) that power the fuel-type filter. Without a key, OSM
  * alone is used.
  *
- * The client NEVER re-validates Places results by category: the request
- * already filters server-side by gas_station, and a client-side re-filter can
- * only shrink the list toward zero when Google's categorization is imperfect —
- * which emptied station lists in the field. Zero-result refreshes are surfaced
- * via [lastRefreshError] so the UI can tell "offline" apart from "network OK,
- * no data".
+ * The client DOES re-verify Places results — but positively-safely
+ * (`PlacesFuelFilter`): only places Google categorizes as petrol pumps
+ * (primary type `gas_station`) are kept, and if verification would empty the
+ * list, the raw results are kept instead (a data quirk can show junk names
+ * but can never blank the screen). Zero-result refreshes are surfaced via
+ * [lastRefreshError] / [lastDataNotice] so the UI can tell "offline" apart
+ * from "network OK, no data".
  */
 class StationRepository(
     private val stationDao: StationDao,
@@ -120,6 +122,12 @@ class StationRepository(
                 return@withContext false
             }
             stationDao.upsertAll(merged.map { it.toEntity(now) })
+            // Keep the cache exactly in sync with what providers say NOW:
+            // rows a provider stopped returning (miscategorized junk Google
+            // fixed upstream, out-of-radius entries) are purged instead of
+            // lingering until the 7-day TTL.
+            stationDao.deleteStale(StationSource.PLACES.name, placesIds(merged))
+            stationDao.deleteStale(StationSource.OSM.name, osmIds(merged))
             stationDao.pruneOlderThan(now - StationOps.CACHE_TTL_MS)
             anySuccess.get()
         }
@@ -130,6 +138,17 @@ class StationRepository(
      */
     @Volatile
     var lastRefreshError: String? = null
+        private set
+
+    /**
+     * Data-quality caveat for the LAST refresh that SUCCEEDED but came back
+     * degraded — e.g. Places results all failed pump verification and
+     * [PlacesFuelFilter]'s never-blank fallback is showing uncategorized
+     * results. Null when the last refresh was fully clean. Read even when
+     * [refresh] returned true, unlike [lastRefreshError].
+     */
+    @Volatile
+    var lastDataNotice: String? = null
         private set
 
     /** Number of places returned by Google before the fuel-station filter. */
@@ -221,7 +240,20 @@ class StationRepository(
             ),
         )
         rawPlacesResultCount = response.places.size
-        return response.places
+        val verified = PlacesFuelFilter.select(response.places)
+        if (verified.size < response.places.size) {
+            Log.d(TAG, "places filter: kept ${verified.size}/${response.places.size} typed gas_station")
+        }
+        if (response.places.isNotEmpty() && verified.isEmpty()) {
+            // Verification disqualified everything — the never-blank fallback
+            // serves Google's raw (possibly junky) results. Tell the user
+            // rather than presenting junk as fact.
+            lastDataNotice = "${response.places.size} places came back but none are " +
+                "categorized as petrol pumps by Google — showing uncategorized results"
+        } else {
+            lastDataNotice = null
+        }
+        return verified
             .mapNotNull { place ->
                 val loc = place.location ?: return@mapNotNull null
                 Station(
@@ -237,6 +269,17 @@ class StationRepository(
                 )
             }
     }
+
+    /** Purges rows of [source] that this refresh no longer returns. */
+    private suspend fun StationDao.deleteStale(source: String, keepIds: List<String>) {
+        if (keepIds.isEmpty()) deleteBySource(source) else deleteStaleBySource(source, keepIds)
+    }
+
+    private fun placesIds(merged: List<Station>): List<String> =
+        merged.filter { it.source == StationSource.PLACES }.map { it.id }
+
+    private fun osmIds(merged: List<Station>): List<String> =
+        merged.filter { it.source == StationSource.OSM }.map { it.id }
 
     private fun Station.toEntity(fetchedAtMs: Long) = StationEntity(
         id = id,

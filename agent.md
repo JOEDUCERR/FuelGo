@@ -43,13 +43,25 @@ over-build. Every feature below is scoped to keep total effort small.
 
 Providers fetched in parallel and merged when a Places key is configured:
 
-- **Google Places API (New)** — Nearby Search, `includedTypes: ["gas_station"]`,
-  field mask including `places.types`/`places.primaryType`. The client does
-  NOT re-validate results by category — Google already filters server-side,
-  and a client-side re-filter can only shrink the list toward zero when
-  Google's India categorization is imperfect (it emptied station lists in the
-  field). Incoming data-quality junk is visible by name instead of blanking
-  the screen.
+- **Google Places API (New)** — Nearby Search with
+  **`includedPrimaryTypes: ["gas_station"]`**, field mask including
+  `places.types`/`places.primaryType`. Research-grounded (google
+  developers docs, Oct 2026): every place has exactly ONE primary type; an
+  Indian petrol pump's primary type is `gas_station` ("Petrol pump" category).
+  `includedTypes` matches ANY type including secondary ones, so imperfect
+  India data lets miscategorized businesses (e.g. "Cheema Boilers Limited",
+  "Teleperformance") match on a stray secondary type — which is why the
+  request filters on the PRIMARY type server-side, and results additionally
+  pass client-side positive-evidence verification (`PlacesFuelFilter`):
+  a POI is kept only if Google categorizes it `gas_station` (primary or
+  listed). If verification would empty the list (a Google data quirk), the
+  raw results are shown instead — junk may be visible, but the station list
+  can never be blank, and the UI shows a truthful "Note: … none are
+  categorized as petrol pumps" banner (`lastDataNotice`). Failed refreshes
+  surface per-provider reasons via `lastRefreshError`.
+  After each successful refresh the cache is purged to exactly what
+  providers currently return — previously fetched junk/POIs no longer
+  returned are deleted immediately, not on the 7-day TTL.
 - **OpenStreetMap Overpass API** — free, keyless, default when no Places key.
   Multiple mirrors are tried in order (`overpass-api.de` → `kumi.systems` →
   `private.coffee` → `maps.mail.ru`) because instances throttle or refuse some

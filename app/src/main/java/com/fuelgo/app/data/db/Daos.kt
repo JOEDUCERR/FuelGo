@@ -16,6 +16,18 @@ interface StationDao {
 
     @Query("DELETE FROM stations WHERE fetchedAtMs < :olderThanMs")
     suspend fun pruneOlderThan(olderThanMs: Long)
+
+    /** Removes every row of one provider, e.g. all previously cached Places junk. */
+    @Query("DELETE FROM stations WHERE source = :source")
+    suspend fun deleteBySource(source: String)
+
+    /**
+     * Keeps only the given rows of one provider — used after a successful
+     * refresh so POIs the provider no longer returns (miscategorized junk
+     * Google fixed upstream, out-of-radius entries) don't linger until TTL.
+     */
+    @Query("DELETE FROM stations WHERE source = :source AND id NOT IN (:keepIds)")
+    suspend fun deleteStaleBySource(source: String, keepIds: List<String>)
 }
 
 @Dao

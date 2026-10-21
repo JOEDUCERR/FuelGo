@@ -9,11 +9,21 @@ import retrofit2.http.POST
  * Google Places API (New) — Nearby Search. Used alongside OSM when a
  * `PLACES_API_KEY` is configured.
  *
- * NOTE: the client intentionally does NOT re-verify the returned POIs'
- * categories. The request already filters server-side by gas_station;
- * a client-side re-filter can only ever shrink the list toward zero when
- * Google's India categorization is imperfect — which emptied station lists in
- * the field. Data-quality junk (if any) is visible by name instead.
+ * RESEARCHED: how Google categorizes Indian petrol pumps.
+ * - Every place has exactly ONE primary type (Table A) plus any number of
+ *   secondary types. A real Indian petrol pump's primary type is
+ *   `gas_station` (displayed as "Petrol pump" in Google Maps India).
+ * - `includedTypes` matches ANY type in a place's `types` list, including
+ *   secondary ones — so imperfect India data lets miscategorized businesses
+ *   (offices, boiler plants) match on a stray secondary type and surface as
+ *   junk pump results.
+ * - `includedPrimaryTypes` matches ONLY the primary type, i.e. places that
+ *   genuinely are petrol pumps. That is what this request uses.
+ *
+ * On top of the server-side primary-type filter, results pass through
+ * [PlacesFuelFilter]: positive-evidence verification with a never-blank
+ * fallback, so bad categorization can show junk results but NEVER an
+ * empty station list.
  */
 interface PlacesApi {
 
@@ -28,7 +38,13 @@ interface PlacesApi {
 
 @Serializable
 data class NearbySearchRequest(
-    val includedTypes: List<String> = listOf("gas_station"),
+    /**
+     * Strict primary-type filter. Docs (developers.google.com/maps/
+     * documentation/places/web-service/nearby-search):
+     * "Use includedPrimaryTypes and excludedPrimaryTypes to filter the
+     * results on a place's primary type."
+     */
+    val includedPrimaryTypes: List<String> = listOf("gas_station"),
     val maxResultCount: Int = 20,
     val locationRestriction: LocationRestriction,
     val rankPreference: String = "DISTANCE",
@@ -54,7 +70,35 @@ data class PlaceDto(
     val regularOpeningHours: RegularOpeningHoursDto? = null,
     val types: List<String> = emptyList(),
     val primaryType: String? = null,
-)
+) {
+    /**
+     * Positive-evidence fuel-pump check: Google tells us this business IS
+     * categorized as a petrol pump (primary or listed types). Requires
+     * affirmative gas_station categorization — absence of evidence is NOT
+     * evidence of a pump.
+     */
+    val isCategorizedFuelPump: Boolean
+        get() = primaryType == "gas_station" || types.contains("gas_station")
+}
+
+/**
+ * Client-side final guard over Places results, defined by the researched
+ * semantics of Google's India data:
+ *
+ * 1. Keep only places Google categorizes as petrol pumps
+ *    ([PlaceDto.isCategorizedFuelPump]) — this drops junk whose stray
+ *    secondary `gas_station` type slipped past the request filter.
+ * 2. NEVER return an empty list when raw results were non-empty: if
+ *    verification disqualifies everything (a Google data quirk), fall back
+ *    to the raw results. Junk may be visible, but a taxi driver always gets
+ *    the screen's core function — a station list — rather than nothing.
+ */
+object PlacesFuelFilter {
+    fun select(raw: List<PlaceDto>): List<PlaceDto> {
+        val verified = raw.filter { it.isCategorizedFuelPump }
+        return if (verified.isNotEmpty() || raw.isEmpty()) verified else raw
+    }
+}
 
 @Serializable
 data class DisplayNameDto(val text: String? = null)

@@ -160,9 +160,11 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             }
             WidgetRefresher.updateFromCache(container.appContext)
             val detail = container.stationRepository.lastRefreshError
+            val notice = container.stationRepository.lastDataNotice
             val errorMessage = when {
-                // Fresh data on screen — never nag.
-                rows.isNotEmpty() && networkOk -> null
+                // Fresh data on screen — never nag, except for a data-quality
+                // notice (Places fell back to uncategorized results).
+                rows.isNotEmpty() && networkOk -> notice?.let { "Note: $it." }
                 // Cache carries the UI after a failed refresh.
                 rows.isNotEmpty() && !networkOk ->
                     "Couldn't refresh — showing cached stations." +
